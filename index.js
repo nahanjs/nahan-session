@@ -1,27 +1,53 @@
 'use strict';
-const crypto = require('crypto');
 const uid = require('uid-safe').sync
-const Cookies = require('./lib/cookies.js');
+const cookies = require('./lib/cookies.js');
+const crypto = require('crypto')
 
 module.exports = Session;
 
-function Session(options, sessions) {
+function Session(options) {
 
     return async (ctx, next) => {
-        let flag = false;
-        const id = ctx.cookies.get('connect.sid');
+        if (ctx.session === undefined) {
 
-        if (id && sessions[id]) {
-            flag = true;
-        }
+            ctx.session = new _Session(options);
 
-        if (!flag) {
-            if (ctx.session === undefined)
-                ctx.session = new _Session(ctx, options);
-            sessions[ctx.session.sessionID] = ctx.session;
-        }
-        else {
-            ctx.session = sessions[ctx.cookies.get('connect.sid')];
+            ctx.session_cookies = cookies(ctx, options.secret || 'secret');
+
+            const id = ctx.session_cookies.get(options.name || 'connect.sid');
+
+            if (id && global.sessions[id]) {
+                ctx.session = global.sessions[ctx.session_cookies.get('connect.sid')];
+            }
+
+            ctx.session_originHash = crypto.createHash('sha1').update(JSON.stringify(ctx.session), 'utf8').digest('hex');
+
+            const _end = ctx.res.end;
+            let ended = false;
+            ctx.res.end = function end(chunk, encoding) {
+                if (ended) {
+                    return false;
+                }
+
+                ended = true;
+
+                if (ctx.session.saveUninitialized) {
+                    ctx.session.save(ctx);
+                    global.sessions[ctx.session.sessionID] = ctx.session;
+                }
+                else if (ctx.session_originHash !== crypto.createHash('sha1').update(JSON.stringify(ctx.session), 'utf8').digest('hex')) {
+
+                    ctx.session.save(ctx);
+                    global.sessions[ctx.session.sessionID] = ctx.session;
+                }
+                else if (ctx.session.rolling && global.sessions[ctx.session.sessionID]) {
+                    ctx.session.save(ctx);
+                }
+                else {
+                }
+
+                return _end.call(ctx.res, chunk, encoding);
+            }
         }
 
         await next();
@@ -30,27 +56,29 @@ function Session(options, sessions) {
 
 
 class _Session {
-    constructor(ctx, options = default_opts) {
-
-        this.req = ctx.req;
-        this.res = ctx.res;
-
+    constructor(options = default_opts) {
         this.name = options.name || 'connect.sid';
         this.sessionID = uid(24);
         this.secret = options.secret || 'secret';
+        this.rolling = Boolean(options.rolling);
+        this.saveUninitialized = Boolean(options.saveUninitialized);
 
-        this.cookie = Cookies(ctx, this.secret);
-        options.cookie.attrs = options.cookie.attrs || { signed: true };
+        options.cookie.attrs = Object.assign({}, default_opts.cookies.attrs, options.cookie.attrs);
         options.cookie.attrs.signed = true;
-        this.cookie.set(this.name, this.sessionID, options.cookie.attrs);
-
+        //expect cookie.expires specific time
+        this.cooikeinfo = options.cookie.attrs;
     }
 
+    save(ctx) {
+        ctx.session_cookies.set(this.name, this.sessionID, this.cooikeinfo);
+    }
 }
 
-var default_opts = {
+const default_opts = {
     name: 'connect.sid',
     secret: 'secret',
+    rolling: false,
+    saveUninitialized: true,
     cookies: {
         name: null,
         value: null,

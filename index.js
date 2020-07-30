@@ -1,93 +1,83 @@
 'use strict';
 const uid = require('uid-safe').sync
-const cookies = require('./lib/cookies.js');
-const crypto = require('crypto')
+const MemoryStore = require('./lib/store-session');
 
 module.exports = Session;
 
 function Session(options) {
 
-    return async (ctx, next) => {
-        if (ctx.session === undefined) {
+    let opts = {};
+    opts.name = options.name || 'connect.sid';
+    opts.secret = options.secret || 'secret';
+    opts.cookie =  { 
+        path: '/',
+        httponly: true,
+        secure: false,
+        max_age: null,
+    };
+    for (let [key, value] of Object.entries(options.cookie))
+        opts.cookie[key] = value;
 
-            ctx.session = new _Session(options);
+    return async (ctx, next) => {    
+        if (ctx.cookies !== undefined) {
 
-            ctx.session_cookies = cookies(ctx, options.secret || 'secret');
+            if (ctx.cookies.secret === opts.secret) {
 
-            const id = ctx.session_cookies.get(options.name || 'connect.sid');
+                if (ctx.session === undefined) {
 
-            if (id && global.sessions[id]) {
-                ctx.session = global.sessions[ctx.session_cookies.get('connect.sid')];
+                    ctx.store_sessions = MemoryStore.sessions;
+
+                    const id = ctx.cookies.get(opts.name);
+        
+                    if (id && ctx.store_sessions[id]) {
+                        ctx.session = ctx.store_sessions[id];
+                    }
+                    else {
+                        ctx.session = new _Session(opts);
+                    }
+
+                    ctx.session.save(ctx);
+                    ctx.store_sessions[ctx.session.sessionID] = ctx.session;
+
+                }
             }
-
-            ctx.session_originHash = crypto.createHash('sha1').update(JSON.stringify(ctx.session), 'utf8').digest('hex');
-
-            const _end = ctx.res.end;
-            let ended = false;
-            ctx.res.end = function end(chunk, encoding) {
-                if (ended) {
-                    return false;
-                }
-
-                ended = true;
-
-                if (ctx.session.saveUninitialized) {
-                    ctx.session.save(ctx);
-                    global.sessions[ctx.session.sessionID] = ctx.session;
-                }
-                else if (ctx.session_originHash !== crypto.createHash('sha1').update(JSON.stringify(ctx.session), 'utf8').digest('hex')) {
-
-                    ctx.session.save(ctx);
-                    global.sessions[ctx.session.sessionID] = ctx.session;
-                }
-                else if (ctx.session.rolling && global.sessions[ctx.session.sessionID]) {
-                    ctx.session.save(ctx);
-                }
-                else {
-                }
-
-                return _end.call(ctx.res, chunk, encoding);
+            else {
+                console.log('The secret is inconsistent');
             }
+        }
+        else {
+            console.log("Cookies not initialized");
         }
 
         await next();
+        //Clean up expired sessions in memory store_sessions
+        for (let [key, value] of Object.entries(ctx.store_sessions)) {
+            if (value.expires !== null) {
+                if (new Date(value.expires) < new Date(Date.now())) {
+                    delete ctx.store_sessions[key];
+                }
+            }
+        }
     };
 }
 
-
 class _Session {
-    constructor(options = default_opts) {
-        this.name = options.name || 'connect.sid';
+    constructor(options) {
+        this.name = options.name;
         this.sessionID = uid(24);
-        this.secret = options.secret || 'secret';
-        this.rolling = Boolean(options.rolling);
-        this.saveUninitialized = Boolean(options.saveUninitialized);
-
-        options.cookie.attrs = Object.assign({}, default_opts.cookies.attrs, options.cookie.attrs);
-        options.cookie.attrs.signed = true;
-        //expect cookie.expires specific time
-        this.cooikeinfo = options.cookie.attrs;
-    }
+        this.secret = options.secret;
+        this.cookie = options.cookie;
+        this.expires = this.cookie.max_age === null ? null : new Date(Date.now() + this.cookie.max_age*1000);
+    };
 
     save(ctx) {
-        ctx.session_cookies.set(this.name, this.sessionID, this.cooikeinfo);
+        ctx.cookies.set(this.name, this.sessionID, this.cookie);
+    }
+
+    deleteS(ctx) {
+        if (ctx.store_sessions[ctx.session.sessionID]) {
+            delete ctx.store_sessions[ctx.session.sessionID];
+            console.log('delete success!');
+        }
     }
 }
-
-const default_opts = {
-    name: 'connect.sid',
-    secret: 'secret',
-    rolling: false,
-    saveUninitialized: true,
-    cookies: {
-        name: null,
-        value: null,
-        attrs: {
-            path: '/',
-            httponly: true,
-            secure: false,
-            max_age: null,
-            signed: true,
-        },
-    },
-};

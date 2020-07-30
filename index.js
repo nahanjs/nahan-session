@@ -1,5 +1,6 @@
 'use strict';
 const uid = require('uid-safe').sync
+const crypto = require('crypto')
 const MemoryStore = require('./lib/store-session');
 
 module.exports = Session;
@@ -9,7 +10,8 @@ function Session(options) {
     let opts = {};
     opts.name = options.name || 'connect.sid';
     opts.secret = options.secret || 'secret';
-    opts.cookie =  { 
+    opts.saveUninitialized = Boolean(options.saveUninitialized);
+    opts.cookie =  {
         path: '/',
         httponly: true,
         secure: false,
@@ -18,7 +20,7 @@ function Session(options) {
     for (let [key, value] of Object.entries(options.cookie))
         opts.cookie[key] = value;
 
-    return async (ctx, next) => {    
+    return async (ctx, next) => {
         if (ctx.cookies !== undefined) {
 
             if (ctx.cookies.secret === opts.secret) {
@@ -36,9 +38,7 @@ function Session(options) {
                         ctx.session = new _Session(opts);
                     }
 
-                    ctx.session.save(ctx);
-                    ctx.store_sessions[ctx.session.sessionID] = ctx.session;
-
+                    ctx.session_originHash = crypto.createHash('sha1').update(JSON.stringify(ctx.session), 'utf8').digest('hex');
                 }
             }
             else {
@@ -47,6 +47,30 @@ function Session(options) {
         }
         else {
             console.log("Cookies not initialized");
+        }
+
+        const _end = ctx.res.end;
+        let ended = false;
+        ctx.res.end = function end(chunk, encoding) {
+            if (ended) {
+                return false;
+            }
+
+            ended = true;
+
+            if (ctx.session.saveUninitialized) {
+                ctx.session.save(ctx);
+                ctx.store_sessions[ctx.session.sessionID] = ctx.session;
+            }
+            else if (ctx.session_originHash !== crypto.createHash('sha1').update(JSON.stringify(ctx.session), 'utf8').digest('hex')) {
+                ctx.session.save(ctx);
+                ctx.store_sessions[ctx.session.sessionID] = ctx.session;
+            }
+            else{
+
+            }
+
+            return _end.call(ctx.res, chunk, encoding);
         }
 
         await next();
@@ -66,8 +90,9 @@ class _Session {
         this.name = options.name;
         this.sessionID = uid(24);
         this.secret = options.secret;
+        this.saveUninitialized = options.saveUninitialized;
         this.cookie = options.cookie;
-        this.expires = this.cookie.max_age === null ? null : new Date(Date.now() + this.cookie.max_age*1000);
+        this.expires = this.cookie.max_age === null ? null : new Date(Date.now() + this.cookie.max_age);
     };
 
     save(ctx) {
